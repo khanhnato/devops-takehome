@@ -1,0 +1,66 @@
+image:
+  # repository and tag are rewritten by CI (.github/workflows/ci.yml, "deploy" job)
+  # after every successful build on main: the tag is always a full git SHA.
+  repository: ghcr.io/OWNER/quote-api
+  tag: "0000000000000000000000000000000000000000"
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+
+# Only used when autoscaling.enabled=false; otherwise the HPA owns replicas.
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 32Mi
+  limits:
+    cpu: "1"
+    memory: 128Mi
+
+env:
+  WORK_DURATION: 100ms   # simulated CPU work per /api/quote request
+  SHUTDOWN_DRAIN: 5s     # keep serving after SIGTERM while endpoints update
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+pdb:
+  maxUnavailable: 1
+
+# Spot/on-demand placement (see templates/deployment.yaml for the reasoning).
+placement:
+  capacityLabel: acme.io/capacity
+  # Nodepools the app may run on at all. Keeps it off GPU/unlabeled nodes.
+  allowedCapacity: [spot, on-demand]
+  # Soft preference for cheap capacity.
+  preferredCapacity: spot
+  preferredWeight: 100
+  # Max allowed difference in replica count between the spot and the on-demand
+  # pool. 1 is what guarantees an on-demand replica at 3 replicas.
+  capacityMaxSkew: 1
+
+service:
+  port: 80
+
+ingress:
+  enabled: true
+  className: traefik
+  host: ""          # empty = match any host, so http://localhost:<port> works
+  path: /
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]

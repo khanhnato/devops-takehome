@@ -1,0 +1,5 @@
+# Provided assignment inputs, kept verbatim as evidence; not code we ship.
+troubleshoot/broken-app.yaml
+ci/legacy.gitlab-ci.yml
+# Third-party lockfile.
+app/go.sum

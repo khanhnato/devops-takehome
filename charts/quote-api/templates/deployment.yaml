@@ -1,0 +1,108 @@
+{{- $p := .Values.placement }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quote-api.name" . }}
+  labels:
+    {{- include "quote-api.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "quote-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "quote-api.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.containerPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Placement policy
+      # 1. required affinity: only spot/on-demand pools (never GPU or unlabeled nodes).
+      # 2. preferred affinity: spot first, for cost.
+      # 3. spread across capacity types with maxSkew=1 / DoNotSchedule: with 3
+      #    replicas, "3 spot / 0 on-demand" has skew 3, so the scheduler is forced
+      #    to put at least one replica on on-demand (2 spot + 1 on-demand). If the
+      #    on-demand replica dies, its replacement must go back to on-demand.
+      #    nodeTaintsPolicy=Honor drops cordoned/drained nodes from the domain
+      #    math, so when a whole pool disappears the remaining pool takes all
+      #    replicas instead of leaving them Pending.
+      #    matchLabelKeys=pod-template-hash applies the rule per ReplicaSet, so a
+      #    rolling update also gets its on-demand replica.
+      # 4. spread across nodes is soft (ScheduleAnyway): it never blocks a reschedule.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: {{ $p.capacityLabel }}
+                    operator: In
+                    values: {{ toJson $p.allowedCapacity }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: {{ $p.preferredWeight }}
+              preference:
+                matchExpressions:
+                  - key: {{ $p.capacityLabel }}
+                    operator: In
+                    values: [{{ $p.preferredCapacity | quote }}]
+      topologySpreadConstraints:
+        - topologyKey: {{ $p.capacityLabel }}
+          maxSkew: {{ $p.capacityMaxSkew }}
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              {{- include "quote-api.selectorLabels" . | nindent 14 }}
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          matchLabelKeys: [pod-template-hash]
+          labelSelector:
+            matchLabels:
+              {{- include "quote-api.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: quote-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          env:
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}

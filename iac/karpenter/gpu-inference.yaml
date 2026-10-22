@@ -1,0 +1,158 @@
+# Part 5a: Karpenter (v1 API: karpenter.sh/v1, karpenter.k8s.aws/v1) for GPU inference on EKS.
+# Checked against the upstream docs (karpenter-provider-aws, website/content/en/docs/concepts,
+# Karpenter v1.14) rather than from memory. v1beta1/v1alpha5 are gone and must not be used.
+#
+# Spot preferred, on-demand fallback: two NodePools that share one EC2NodeClass.
+# Karpenter tries the higher-weight pool first. When spot GPU capacity is not
+# available (ICE), it marks those offerings unavailable and the pending pods
+# fall through to the on-demand pool.
+#
+# Workloads opt in with:
+#   nodeSelector:  { acme.io/node-type: gpu }
+#   tolerations:   [{ key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }]
+#   resources:     { limits: { nvidia.com/gpu: 1 } }
+#   annotations:   { karpenter.sh/do-not-disrupt: "true" }   # optional: long-lived model servers
+#   terminationGracePeriodSeconds: 120                        # finish in-flight requests (fits the 2-min spot notice)
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu
+spec:
+  role: KarpenterNodeRole-prod-eks        # IAM role for the nodes (instance profile is created by Karpenter)
+  # Bottlerocket picks its NVIDIA variant automatically for GPU instance types
+  # (driver + device plugin preinstalled). Pin a version in prod and roll it via drift.
+  amiSelectorTerms:
+    - alias: bottlerocket@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-eks
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: prod-eks
+  blockDeviceMappings:
+    # Bottlerocket: OS volume + data volume. Model weights and images live on the data volume.
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 4Gi
+        volumeType: gp3
+        encrypted: true
+    - deviceName: /dev/xvdb
+      ebs:
+        volumeSize: 200Gi
+        volumeType: gp3
+        iops: 6000
+        throughput: 500
+        encrypted: true
+        deleteOnTermination: true
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required            # IMDSv2 only
+    httpPutResponseHopLimit: 1      # pods use IRSA/Pod Identity, not the node role
+  tags:
+    team: ml-platform
+    cost-center: ai-inference
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-spot
+spec:
+  weight: 100                       # tried first
+  template:
+    metadata:
+      labels:
+        acme.io/node-type: gpu
+        acme.io/capacity: spot
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          # Several families/sizes = more spot pools to choose from = fewer interruptions.
+          values: ["g5", "g6", "g6e"]
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1", "4"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      expireAfter: 336h             # recycle nodes every 14 days (AMI/security patches)
+      terminationGracePeriod: 30m   # upper bound for a drain, even with do-not-disrupt pods
+  disruption:
+    # Never repack busy GPU nodes to save money: only remove nodes with no
+    # workload pods, after they have been empty for 10 minutes (avoids churn
+    # between bursts and keeps warm nodes for model loading).
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+    budgets:
+      - nodes: "10%"
+      # No voluntary drift replacement during business hours (UTC+7).
+      - nodes: "0"
+        reasons: ["Drifted"]
+        schedule: "0 2 * * mon-fri"   # 09:00 ICT
+        duration: 10h
+  limits:
+    nvidia.com/gpu: "16"
+    cpu: "256"
+    memory: 1024Gi
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-on-demand
+spec:
+  weight: 10                        # fallback when spot is unavailable
+  template:
+    metadata:
+      labels:
+        acme.io/node-type: gpu
+        acme.io/capacity: on-demand
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["g5", "g6", "g6e"]
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1", "4"]
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+      expireAfter: 336h
+      terminationGracePeriod: 30m
+  disruption:                       # same policy as gpu-spot
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 10m
+    budgets:
+      - nodes: "10%"
+      - nodes: "0"
+        reasons: ["Drifted"]
+        schedule: "0 2 * * mon-fri"
+        duration: 10h
+  # Smaller cap: on-demand GPUs cost roughly 3x spot, so the fallback is bounded.
+  limits:
+    nvidia.com/gpu: "8"
+    cpu: "128"
+    memory: 512Gi

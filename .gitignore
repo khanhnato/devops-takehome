@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+# Local/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Never commit credentials
+.env
+kubeconfig*

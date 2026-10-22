@@ -1,0 +1,32 @@
+# Argo CD Application for quote-api. scripts/20-deploy.sh fills in
+# __REPO_URL__ from this clone's `origin` remote (override with REPO_URL=...).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: quote-api
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: __REPO_URL__
+    targetRevision: __REVISION__
+    path: charts/quote-api
+    helm:
+      releaseName: quote-api
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: quote
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

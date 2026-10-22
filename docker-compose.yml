@@ -1,0 +1,19 @@
+# One command brings up the whole lab:
+#   docker compose up -d
+# The toolbox container uses the host Docker socket to create a k3d cluster
+# (1 server + 4 agents, each a sibling container) and then stays up so that
+# ./scripts/*.sh can run inside it. Progress: docker compose logs -f toolbox
+name: quote-platform
+
+services:
+  toolbox:
+    build: ./toolbox
+    image: quote-platform-toolbox:local
+    environment:
+      CLUSTER_NAME: quote
+      HTTP_PORT: ${HTTP_PORT:-8080}      # host port -> Traefik ingress
+      ARGOCD_PORT: ${ARGOCD_PORT:-8081}  # host port -> Argo CD UI
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - ./:/workspace
+    restart: unless-stopped
