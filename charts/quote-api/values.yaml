@@ -1,8 +1,8 @@
 image:
   # repository and tag are rewritten by CI (.github/workflows/ci.yml, "deploy" job)
   # after every successful build on main: the tag is always a full git SHA.
-  repository: ghcr.io/OWNER/quote-api
-  tag: "0000000000000000000000000000000000000000"
+  repository: ghcr.io/khanhnato/quote-api
+  tag: "d47fbad0d509beb6b5bb0ec4c38a30b9d7737581"
   pullPolicy: IfNotPresent
 
 containerPort: 8080
