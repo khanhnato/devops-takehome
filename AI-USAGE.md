@@ -13,17 +13,17 @@
 
 ## Representative prompts that moved things forward
 
-1. *"Kiểm tra lại đầu bài giúp tôi là khi chạy scripts/run-all.sh thì họ có yêu cầu là lệnh đó cài các tool cần thiết trên môi trường họ không?"*
-   ("check the brief: does `run-all.sh` have to install tools on the reviewer's machine?")
+I wrote these prompts in Vietnamese; they are translated below.
+
+1. *"Check the brief for me: when the reviewer runs `scripts/run-all.sh`, are we required to have it install the tools it needs on their machine?"*
    - The answer was no: tools live in the toolbox, and the host only needs Docker.
    - Re-reading the host-side code to answer it exposed a **crash on macOS's bash 3.2**. An empty array expanded under `set -u` (`tty[@]: unbound variable`) would have killed `./scripts/run-all.sh` for any Mac reviewer running it in a terminal.
    - Reproduced with `/bin/bash` 3.2, then fixed.
-2. *"Khi lệnh docker compose up -d xong … reviewer sẽ nghĩ là đã chạy xong và sẽ bắt đầu test, dễ dẫn đến hiểu nhầm là fail"*
-   ("`docker compose up -d` says Started while the cluster is still bootstrapping, so a reviewer will test too early and think it failed").
+2. *"When `docker compose up -d` finishes it prints that everything is started … the reviewer will think it's done and start testing, which can easily be mistaken for a failure."*
+   (The cluster was in fact still bootstrapping at that point.)
    - I had hit exactly that myself: `curl` gave `Empty reply from server`.
    - This led to the `cluster-ready` gate service: `up -d` now blocks until the toolbox healthcheck passes, and fails fast if the bootstrap fails.
-3. *"Tôi muốn phần run-all.sh cũng nên có check healthy/ready để reviewer biết, trước khi reviewer chạy test"*
-   ("`run-all.sh` should show health/readiness checks before the tasks start").
+3. *"I want `run-all.sh` to also include a healthy/ready check, so the reviewer knows the state before the tests run."*
    - This produced `10-preflight.sh`.
    - Testing it with `PREFLIGHT_TIMEOUT=10` exposed that **host environment variables never reached the toolbox**, so documented knobs like `MAX_ERRORS=2` had silently done nothing (see 7 below).
 
