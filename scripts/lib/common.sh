@@ -18,13 +18,26 @@ ARGOCD_PORT="${ARGOCD_PORT:-8081}"
 if [ -z "${IN_TOOLBOX:-}" ]; then
   command -v docker >/dev/null || { echo "docker not found on PATH" >&2; exit 1; }
   if ! docker compose -f "$REPO_ROOT/docker-compose.yml" ps --status running --services 2>/dev/null | grep -qx toolbox; then
-    echo "The toolbox container is not running. Start it first:  docker compose up -d" >&2
+    if [ -n "${TOOLBOX_RUN_OK:-}" ]; then
+      # e.g. 99-teardown after a failed bootstrap: use a throwaway toolbox container instead.
+      script="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+      exec docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm -T --no-deps --entrypoint "" toolbox \
+        "/workspace/${script#"$REPO_ROOT"/}" "$@"
+    fi
+    echo "The toolbox container is not running. Start it with:  docker compose up -d" >&2
+    echo "(If it stopped on its own, the cluster bootstrap failed: docker compose logs toolbox)" >&2
     exit 1
   fi
-  # No arrays here: macOS ships bash 3.2, where an empty "${arr[@]}" trips `set -u`.
-  no_tty="-T"; [ -t 0 ] && [ -t 1 ] && no_tty=""
+  # Forward the documented knobs (e.g. MAX_ERRORS=2 ./scripts/25-...) into the
+  # container; `docker compose exec` does not pass the host environment.
+  # bash 3.2 (macOS) + set -u: expand possibly-empty arrays as ${a[@]+"${a[@]}"}.
+  fwd=()
+  for v in MAX_ERRORS REPO_URL REVISION PREFLIGHT_TIMEOUT ARGOCD_CHART_VERSION K3S_IMAGE; do
+    [ -n "${!v:-}" ] && fwd+=(-e "$v=${!v}")
+  done
+  [ -t 0 ] && [ -t 1 ] || fwd+=(-T)
   script="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-  exec docker compose -f "$REPO_ROOT/docker-compose.yml" exec ${no_tty:+"$no_tty"} toolbox \
+  exec docker compose -f "$REPO_ROOT/docker-compose.yml" exec ${fwd[@]+"${fwd[@]}"} toolbox \
     "/workspace/${script#"$REPO_ROOT"/}" "$@"
 fi
 

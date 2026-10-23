@@ -5,6 +5,7 @@ source "$(dirname "$0")/lib/common.sh"
 wait_for_bootstrap
 
 ARGOCD_CHART_VERSION="${ARGOCD_CHART_VERSION:-10.10.5}"   # Argo CD v3.5.5
+DESCHEDULER_CHART_VERSION="${DESCHEDULER_CHART_VERSION:-0.37.0}"
 
 # --- Which repo should Argo CD sync? Default: this clone's origin remote.
 if [ -z "${REPO_URL:-}" ]; then
@@ -22,6 +23,16 @@ helm upgrade --install argocd argo/argo-cd \
   --namespace argocd --create-namespace \
   --values "$REPO_ROOT/argocd/values.yaml" \
   --wait --timeout 10m
+
+# Restores "at least one replica on on-demand" after the on-demand node comes
+# back (spread constraints are only checked at scheduling time).
+log "Installing descheduler (chart $DESCHEDULER_CHART_VERSION, topology-spread only, every 1m)"
+helm repo add descheduler https://kubernetes-sigs.github.io/descheduler/ --force-update >/dev/null
+helm upgrade --install descheduler descheduler/descheduler \
+  --version "$DESCHEDULER_CHART_VERSION" \
+  --namespace kube-system \
+  --values "$REPO_ROOT/descheduler/values.yaml" \
+  --wait --timeout 5m
 
 log "Applying Application quote-api -> $REPO_URL @ $REVISION (charts/quote-api)"
 sed -e "s#__REPO_URL__#${REPO_URL}#" -e "s#__REVISION__#${REVISION}#" \

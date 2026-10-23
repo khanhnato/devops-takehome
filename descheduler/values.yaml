@@ -1,0 +1,29 @@
+# Descheduler (kubernetes-sigs) Helm values. Installed by scripts/20-deploy.sh.
+#
+# Why: topology spread constraints are only evaluated when a pod is scheduled.
+# If the on-demand node goes away, its replica moves to spot (good: no Pending
+# pods), but when on-demand capacity comes back nothing moves a replica back,
+# so "at least one replica on on-demand" stays violated until the next rollout.
+# The descheduler re-checks every minute and evicts one pod from the
+# over-represented domain (respecting the PDB); the scheduler then has to place
+# it on on-demand because of the maxSkew=1 / DoNotSchedule constraint.
+kind: Deployment
+deschedulingInterval: 1m
+replicas: 1
+
+deschedulerPolicy:
+  profiles:
+    - name: quote-api-placement
+      pluginConfig:
+        - name: DefaultEvictor
+          args:
+            nodeFit: true            # only evict if the pod can be placed somewhere else
+        - name: RemovePodsViolatingTopologySpreadConstraint
+          args:
+            constraints: [DoNotSchedule]   # only the hard capacity-type rule, never the soft per-node spread
+            namespaces:
+              include: [quote]
+      plugins:
+        balance:
+          enabled:
+            - RemovePodsViolatingTopologySpreadConstraint

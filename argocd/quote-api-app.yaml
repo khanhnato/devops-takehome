@@ -6,7 +6,8 @@ metadata:
   name: quote-api
   namespace: argocd
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+    # Cascade-delete the app's resources with the Application (domain-qualified form).
+    - resources-finalizer.argocd.argoproj.io/background
 spec:
   project: default
   source:

@@ -6,33 +6,54 @@ challenge, a GitHub Actions pipeline migrated from GitLab CI, Karpenter + Cloudf
 
 | Part | Status | Where |
 |---|---|---|
-| 1. Service + image | done | [`app/`](app/), image `ghcr.io/<owner>/quote-api:<git-sha>` |
+| 1. Service + image | done | [`app/`](app/), image [`ghcr.io/khanhnato/quote-api:<git-sha>`](https://github.com/khanhnato/devops-takehome/pkgs/container/quote-api) |
 | 2. GitOps + placement + reclaim drill | done | [`charts/quote-api/`](charts/quote-api/), [`argocd/`](argocd/), `scripts/20`, `scripts/25` |
 | 3. Troubleshooting | done | [`troubleshoot/fixed-app.yaml`](troubleshoot/fixed-app.yaml), [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) |
 | 4. GitLab → GitHub Actions | done | [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`MIGRATION-NOTES.md`](MIGRATION-NOTES.md) |
-| 5. Karpenter + Cloudflare (validate-only) | done | [`iac/`](iac/), `scripts/50` |
+| 5. Karpenter + Cloudflare (validate-only) | done | [`iac/`](iac/) (incl. the spot vs on-demand paragraph in [`iac/README.md`](iac/README.md)), `scripts/50` |
 | 6. Load test + observability | **not done**, see [what I cut](#what-i-cut-and-why) | |
 | 7. Ops questions | done | [`OPS-ANSWERS.md`](OPS-ANSWERS.md) |
 | AI usage | done | [`AI-USAGE.md`](AI-USAGE.md) |
 
 ## Quick start
 
-Requirements: Docker (Desktop, OrbStack, or Engine) with **≥ 4 CPUs / 6 GB RAM** for Docker, and free host ports 8080 and 8081.
+Requirements: Docker with Compose v2 (Docker Desktop, OrbStack, Colima or Docker Engine; tested on Colima), **≥ 4 CPUs / 6 GB RAM** for Docker, free host ports 8080 and 8081, and outbound internet (Docker Hub, GHCR, GitHub).
 
 ```bash
 git clone <this-repo> && cd <this-repo>
-docker compose up -d          # builds the toolbox, creates the k3d cluster, labels nodepools (~2-3 min)
-./scripts/run-all.sh          # deploy via Argo CD, reclaim drill, troubleshooting, IaC validation
+docker compose up -d          # builds the toolbox, creates the k3d cluster, labels nodepools.
+                              # Blocks until the cluster is ready (measured: ~4 min from an empty Docker).
+./scripts/run-all.sh          # preflight, deploy via Argo CD, drills, troubleshooting, IaC validation
+                              # (measured: ~13 min cold, mostly first-time image pulls; ~1 min on re-runs)
 
 curl http://localhost:8080/api/quote
 open http://localhost:8081    # Argo CD UI (admin password is printed by scripts/20-deploy.sh)
 ```
 
-`run-all.sh` waits for the bootstrap to finish, so it is safe to run it right after `docker compose up -d`.
+`docker compose up -d` returns only when the cluster is bootstrapped (a tiny `cluster-ready` service waits on the toolbox healthcheck),
+and fails fast with `dependency failed to start` if the bootstrap fails. The app itself is deployed by `run-all.sh`,
+so `curl` returns 404 until `scripts/20-deploy.sh` has run.
 Each `scripts/NN-*.sh` can also be run on its own, from the host or from inside the toolbox (`docker compose exec toolbox bash`).
 Every script is idempotent.
 
 Clean up: `./scripts/99-teardown.sh && docker compose down`.
+
+### Verified results (cold run from an empty Docker: Intel Mac, Colima 6 CPU / 10 GB, k3s v1.35.9)
+
+| Check | Result |
+|---|---|
+| `docker compose up -d` | exit 0 after 248 s; blocks until `toolbox Healthy` |
+| `10-preflight.sh` | 10/10 OK. It waited for metrics-server and Traefik, which k3s installs asynchronously after the bootstrap |
+| `20-deploy.sh` | Argo CD Application `Synced/Healthy`; placement 2 spot + 1 on-demand, 0 on GPU |
+| `25-reclaim-drill.sh` phase 1 | Spot node drained under load: 3/3 replicas ready again in 7 s, placement still holds |
+| `25-reclaim-drill.sh` phase 2 | On-demand node drained: 3 spot / 0 Pending. After uncordon, the descheduler restored an on-demand replica in 10 s (41 s in an earlier run) |
+| Traffic across both phases | **93 requests, 0 failed** |
+| Footprint | ~2 GB RAM across the 5 k3s nodes (`docker stats`) |
+| `30-troubleshoot.sh` | `verify.sh` → `PASS` (outputs in [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) are captured, not hand-written) |
+| `50-validate-tf.sh` | `terraform validate` OK; 3/3 Karpenter resources valid |
+| `run-all.sh` | exit 0 after 784 s cold. Ran twice in a row: both exit 0, second run `helm upgrade` + Application `unchanged` → idempotent |
+| `99-teardown.sh` | Works twice in a row (`No clusters found`) and while the toolbox is stopped |
+| CI on GitHub | Semgrep, tests, Helm lint, build + Trivy + push + cosign, GitOps bump: all green |
 
 ## Architecture
 
@@ -42,7 +63,7 @@ flowchart LR
     direction LR
     user(["curl / browser"])
     subgraph compose["docker compose"]
-      toolbox["toolbox container<br/>kubectl · helm · terraform · k6 · k3d<br/>./scripts bind-mounted at /workspace"]
+      toolbox["toolbox container<br/>kubectl · helm · terraform · k6 · k3d<br/>repo bind-mounted at /workspace"]
     end
     sock[["/var/run/docker.sock"]]
     toolbox -- "k3d cluster create" --> sock
@@ -60,6 +81,10 @@ flowchart LR
       subgraph gpu["acme.io/node-type=gpu<br/>taint nvidia.com/gpu:NoSchedule"]
         a3["agent-3<br/>(Part 3 ai-inference only)"]
       end
+      traefik["Traefik ×2 + PDB<br/>(k3s ingress)"]
+      argocd["Argo CD<br/>(ns argocd)"]
+      desched["descheduler<br/>(restores on-demand replica)"]
+      app["quote-api ×3..10 (ns quote)<br/>HPA + PDB<br/>2× spot + ≥1 on-demand"]
     end
     user -- ":8080 /api/quote" --> lb
     user -- ":8081" --> lb
@@ -68,13 +93,14 @@ flowchart LR
 
   gh[("GitHub repo<br/>charts/quote-api")]
   ghcr[("GHCR<br/>quote-api:&lt;git-sha&gt;")]
-  argocd["Argo CD<br/>(ns argocd)"]
-  traefik["Traefik ×2<br/>(k3s ingress)"]
-  app["quote-api pods ×3..10<br/>HPA + PDB<br/>2× spot + ≥1 on-demand"]
 
   lb --> traefik --> app
+  lb -- ":30080" --> argocd
   argocd -- "polls Helm chart" --> gh
   argocd -- "syncs Deployment/Service/Ingress/HPA/PDB" --> app
+  desched -. "evicts to fix spread" .-> app
+  app -. "2 replicas" .-> spot
+  app -. "≥1 replica" .-> od
   app -. "image pull" .-> ghcr
 ```
 
@@ -116,11 +142,12 @@ flowchart LR
 | Script | What it does | When |
 |---|---|---|
 | `scripts/00-cluster-up.sh` | Creates/starts the k3d cluster (1 server + 4 agents, k3s v1.35.9), joins the toolbox to the cluster network, writes the kubeconfig, makes Traefik HA, runs `troubleshoot/prepare.sh`. | Automatically on `docker compose up -d` (toolbox entrypoint). Re-run manually if needed. |
-| `scripts/20-deploy.sh` | Installs Argo CD (Helm chart 10.10.5) and applies the `quote-api` Application pointing at this repo's `origin`. Waits for Synced/Healthy, asserts placement, curls through the ingress. | After bootstrap. |
-| `scripts/25-reclaim-drill.sh` | Runs a curl loop through the ingress, drains a spot node that hosts a replica, waits for the replacement replicas, prints scheduling events, re-asserts placement, reports failed requests (fails if > `MAX_ERRORS`, default 0), uncordons the node. | After 20. |
+| `scripts/10-preflight.sh` | Health gate: API server, 5 nodes Ready, nodepool labels + GPU taint, CoreDNS, metrics-server + Metrics API (HPA), Traefik 2/2, ingress answering; warns if github.com / ghcr.io are unreachable. Waits up to `PREFLIGHT_TIMEOUT` (300 s) per check, prints an OK/FAIL table and stops `run-all.sh` before any task if the lab isn't ready. | First step of `run-all.sh`; run alone any time to ask "is my lab ready?". |
+| `scripts/20-deploy.sh` | Installs Argo CD (Helm chart 10.10.5) and the descheduler (chart 0.37.0, topology-spread plugin only), then applies the `quote-api` Application pointing at this repo's `origin`. Waits for Synced/Healthy, asserts placement, curls through the ingress. | After bootstrap. |
+| `scripts/25-reclaim-drill.sh` | Curl loop through the ingress for the whole run, two phases. **1 - spot reclaim:** drains a spot node hosting a replica, shows the rescheduling, re-asserts placement, uncordons. **2 - on-demand outage:** drains the on-demand node (replicas must fall back to spot, none Pending), uncordons it and waits for the descheduler to put a replica back on on-demand. Fails if any request fails (`MAX_ERRORS`, default 0). | After 20. |
 | `scripts/30-troubleshoot.sh` | Applies `troubleshoot/fixed-app.yaml` and runs `troubleshoot/verify.sh` (prints `PASS`). `--from-broken` first applies the original broken manifests. | Any time after bootstrap. |
 | `scripts/50-validate-tf.sh` | `terraform fmt -check`, `init -backend=false`, `validate` on `iac/cloudflare`; strict kubeconform of the Karpenter manifests against the v1 CRD schemas. | Any time (no cluster needed). |
-| `scripts/run-all.sh` | Waits for the bootstrap, then runs 20 → 25 → 30 → 50. | The reviewer's entry point. |
+| `scripts/run-all.sh` | Waits for the bootstrap, then runs 10 (preflight) → 20 → 25 → 30 → 50. | The reviewer's entry point. |
 | `scripts/99-teardown.sh` | Deletes the k3d cluster (`docker compose down` alone leaves it running). | Clean-up. |
 
 ## Design decisions & trade-offs
@@ -134,6 +161,8 @@ flowchart LR
   - `maxSkew: 2` looks cheaper but is wrong: after losing the on-demand pod, 2/0 is a skew of 2, which is allowed, so the replacement could land on spot.
   - Why it doesn't block rescheduling: `nodeTaintsPolicy: Honor` removes cordoned/drained nodes from the spread math. If a whole pool disappears, the survivors take every replica instead of the pods sitting in Pending.
     Per-node spread is `ScheduleAnyway`. `matchLabelKeys: [pod-template-hash]` applies the rule per ReplicaSet, so rolling updates keep it too.
+  - **Spread is only checked at scheduling time**, so after an on-demand outage the replicas would stay on spot even once the node is back. Verified: draining and uncordoning the on-demand node left `on-demand=0`.
+    The **descheduler** (`RemovePodsViolatingTopologySpreadConstraint`, hard constraints only, namespace `quote`, every 1 m, respecting the PDB) evicts one spot replica, and the scheduler must place it on on-demand. Drill phase 2 proves it.
   - Trade-off: at high HPA counts the capacity spread stays ~50/50, so I pay for more on-demand than strictly needed (e.g. 5 of 10).
     In production I would run a small on-demand "anchor" Deployment plus a spot-preferring Deployment behind the same Service, or use Karpenter capacity-type spread with a larger skew. I kept the single Deployment because the brief asks for one HPA with `minReplicas: 3`.
 - **Graceful shutdown in the app:** on SIGTERM it fails `/readyz`, keeps serving for 5 s while endpoints and Traefik update, then drains connections.
@@ -142,7 +171,7 @@ flowchart LR
 - **Image tag = full git SHA, promoted by a Git commit** (bot updates `values.yaml`, Argo CD syncs). Deploys are reviewable and revertible with `git revert`, and CI holds no cluster credentials.
   `latest` is pushed only as a convenience alias and is never deployed.
 - **Argo CD Application source = this repo's `origin` remote**, filled in by `20-deploy.sh`. A fork or a re-hosted clone therefore deploys its own chart with no edits (override with `REPO_URL=...`).
-- **Go + distroless static (`nonroot`, UID 65532):** the image is ~10 MB with no shell, and runs with a read-only root filesystem with no writable volumes. It is multi-arch (amd64 + arm64), so it works on Apple Silicon.
+- **Go + distroless static (`nonroot`, UID 65532):** the image is ~19 MB (uncompressed, measured) with no shell, and runs with a read-only root filesystem with no writable volumes. It is multi-arch (amd64 + arm64), so it works on Apple Silicon.
 - **Pinned versions everywhere** (k3s, kubectl, helm, Argo CD chart, Terraform provider, GitHub Actions pinned by commit SHA). I looked up the current releases rather than trusting memory.
 
 ### What I cut, and why
@@ -162,7 +191,7 @@ Treated as an imperfect handoff. Each finding has a decision:
 2. **`prepare.sh` assigns pools by `kubectl get nodes` order** (alphabetical). With k3d's names, `agent-0/1` are spot, `agent-2` is on-demand and `agent-3` is GPU.
    It is deterministic, but adding a fifth agent leaves it unlabeled. The chart's required node affinity keeps quote-api off unlabeled nodes.
 3. **`prepare.sh` says "run ONCE"**, but every command uses `--overwrite`, so re-running it on each bootstrap is safe. It is idempotent, as the Golden Rule requires.
-4. **`broken-app.yaml` had 8 independent faults**, including one that only shows up after the others are fixed (NetworkPolicy blocking DNS). See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
+4. **`broken-app.yaml` had 8 independent faults**, several hidden behind others (e.g. the bad image tag only surfaces after the ConfigMap fix; the NetworkPolicy only matters once the Service works). See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 5. **`legacy.gitlab-ci.yml` hard-codes AWS keys** (AWS documentation example values) and has a quality gate that can never fail. Handled in [`MIGRATION-NOTES.md`](MIGRATION-NOTES.md).
    - Decision: the two key values are **redacted** in this repo (`<REDACTED: …>`); the rest of the file is verbatim.
    - The brief says "do not commit secrets of any kind". Example values are still credential-shaped and trip secret scanners, and once committed they live in Git history forever.
@@ -171,11 +200,12 @@ Treated as an imperfect handoff. Each finding has a decision:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `port is already allocated` on `docker compose up` / bootstrap fails | 8080 or 8081 already used on the host | `./scripts/99-teardown.sh; HTTP_PORT=9080 ARGOCD_PORT=9081 docker compose up -d --force-recreate` |
+| `docker compose up -d` fails with `dependency failed to start`, log shows `port is already allocated` | 8080 or 8081 already used on the host | `docker compose down && HTTP_PORT=9080 ARGOCD_PORT=9081 docker compose up -d` (then use `localhost:9080`) |
 | Bootstrap stuck / pods `Pending` with `Insufficient cpu/memory` | Docker VM too small for 5 k3s nodes + Argo CD | Give Docker ≥ 4 CPUs / 6 GB (Docker Desktop → Settings → Resources) |
 | `Cannot connect to the Docker daemon` inside toolbox | The daemon's socket is not at `/var/run/docker.sock` *as seen by the daemon* (rootless Docker on Linux). Docker Desktop, OrbStack and Colima all work with the default, because the bind-mount path is resolved inside their VM, not on macOS. | Rootless: `DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock docker compose up -d` |
 | `ImagePullBackOff` on quote-api | GHCR package still private, or the first CI run hasn't finished | Make the package public (GitHub → Packages → quote-api → Settings → Visibility); check the Actions tab |
-| `run-all.sh` says bootstrap failed | See the log | `docker compose logs toolbox`; re-run with `docker compose restart toolbox` |
+| `docker compose up -d` fails with `dependency failed to start: container … exited (1)` | The cluster bootstrap failed; the toolbox stops on purpose so this is visible | `docker compose logs toolbox`, fix the cause, run `docker compose up -d` again (safe: bootstrap is idempotent). `./scripts/99-teardown.sh` works even while the toolbox is stopped |
+| `10-preflight.sh` reports `[FAIL]` | A component is not ready after `PREFLIGHT_TIMEOUT` (default 300 s), often slow image pulls | Re-run `./scripts/run-all.sh`, or `PREFLIGHT_TIMEOUT=600 ./scripts/run-all.sh` on slow networks |
 
 Apple Silicon works: the app image is multi-arch and the toolbox downloads binaries for the build architecture.
 

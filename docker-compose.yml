@@ -3,6 +3,9 @@
 # The toolbox container uses the host Docker socket to create a k3d cluster
 # (1 server + 4 agents, each a sibling container) and then stays up so that
 # ./scripts/*.sh can run inside it. Progress: docker compose logs -f toolbox
+#
+# `up -d` returns only once the cluster is ready (or fails fast if the
+# bootstrap fails): `cluster-ready` waits for the toolbox healthcheck.
 name: quote-platform
 
 services:
@@ -16,4 +19,14 @@ services:
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - ./:/workspace
-    restart: unless-stopped
+    # No restart policy: a failed bootstrap exits the container so that
+    # `docker compose up -d` reports the failure instead of looping on it.
+
+  # Gate only: makes `docker compose up -d` block until the cluster is
+  # bootstrapped (toolbox healthy), then exits. It runs nothing else.
+  cluster-ready:
+    image: quote-platform-toolbox:local
+    entrypoint: ["echo", "Cluster ready. Next: ./scripts/run-all.sh"]
+    depends_on:
+      toolbox:
+        condition: service_healthy

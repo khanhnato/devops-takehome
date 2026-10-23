@@ -4,37 +4,55 @@
 
 | Tool | Used for |
 |---|---|
-| **Claude Code** (Claude Opus, in VS Code) | Reading and explaining the brief; scaffolding the repo (Go service, Dockerfiles, Helm chart, scripts, workflow, Terraform, Karpenter YAML); first drafts of the docs. |
-| Local verification tooling (not AI) | `go vet`/`go test -race`, `helm lint` + `helm template`, `kubeconform -strict` (k8s 1.35 + Karpenter v1 CRD schemas), `terraform fmt/validate`, Semgrep 1.182.0, live lookups of current release versions. |
+| **Claude Code** (Claude Opus, in VS Code) | Explaining the brief; scaffolding the repo (Go service, Dockerfiles, Helm chart, scripts, workflow, Terraform, Karpenter YAML); debugging on the live cluster; first drafts of the docs. |
+| Verification tooling (not AI) | `go vet`/`go test -race`, `helm lint` + `helm template`, `kubeconform -strict` (k8s 1.35 + Karpenter v1 CRD schemas), `terraform fmt/validate`, Semgrep 1.182.0, shellcheck, live release lookups, and the k3d cluster itself. |
 
-How I worked: the AI drafts, and then I verify every claim against a tool, the upstream docs, or a live cluster before it stays in the repo.
-Anything I couldn't verify yet is marked as such (for example the TODO at the top of `TROUBLESHOOTING.md`).
+**How I worked:** the AI drafts, and nothing stays in the repo until it is verified against a tool, the upstream docs, or a live run.
+- Versions were pinned from live release data, not from memory: k3s/kubectl 1.35.9, Argo CD chart 10.10.5, Cloudflare provider 5.28, Karpenter v1.14 docs, and GitHub Actions by commit SHA.
+- The most useful thing I did was **question the output**. Each of the prompts below exposed a real bug.
 
 ## Representative prompts that moved things forward
 
-1. *"Đọc file ASSIGNMENT - DevOps.md và giải thích yêu cầu trong đó cho tôi"* ("read the assignment and explain the requirements to me").
-   Produced a structured breakdown of the brief, and flagged early that the provided files might be intentionally imperfect and that `run-all.sh` is mine to write.
-2. *"Giờ hãy tạo giúp tôi 1 repo theo đúng yêu cầu, trước mắt để local đã"* ("now create a repo that meets the requirements, local only for now").
-   This is the scaffolding run. I asked it to pin current versions by checking live sources, and to validate everything that can be validated without a cluster.
-3. Follow-up on the placement policy: *"why maxSkew 1 and not 2? what happens to the spread constraint when a node is cordoned during the drill?"*
-   This led to `nodeTaintsPolicy: Honor` and the written reasoning in the chart and README.
+1. *"Kiểm tra lại đầu bài giúp tôi là khi chạy scripts/run-all.sh thì họ có yêu cầu là lệnh đó cài các tool cần thiết trên môi trường họ không?"*
+   ("check the brief: does `run-all.sh` have to install tools on the reviewer's machine?")
+   - The answer was no: tools live in the toolbox, and the host only needs Docker.
+   - Re-reading the host-side code to answer it exposed a **crash on macOS's bash 3.2**. An empty array expanded under `set -u` (`tty[@]: unbound variable`) would have killed `./scripts/run-all.sh` for any Mac reviewer running it in a terminal.
+   - Reproduced with `/bin/bash` 3.2, then fixed.
+2. *"Khi lệnh docker compose up -d xong … reviewer sẽ nghĩ là đã chạy xong và sẽ bắt đầu test, dễ dẫn đến hiểu nhầm là fail"*
+   ("`docker compose up -d` says Started while the cluster is still bootstrapping, so a reviewer will test too early and think it failed").
+   - I had hit exactly that myself: `curl` gave `Empty reply from server`.
+   - This led to the `cluster-ready` gate service: `up -d` now blocks until the toolbox healthcheck passes, and fails fast if the bootstrap fails.
+3. *"Tôi muốn phần run-all.sh cũng nên có check healthy/ready để reviewer biết, trước khi reviewer chạy test"*
+   ("`run-all.sh` should show health/readiness checks before the tasks start").
+   - This produced `10-preflight.sh`.
+   - Testing it with `PREFLIGHT_TIMEOUT=10` exposed that **host environment variables never reached the toolbox**, so documented knobs like `MAX_ERRORS=2` had silently done nothing (see 7 below).
 
 ## Where the AI was wrong or suboptimal, and how it was caught
 
 1. **Wrong claim about secret scanning.** The first draft of `MIGRATION-NOTES.md` said the legacy file's AWS keys are "correctly flagged by `p/secrets`".
-   - Caught by actually running Semgrep 1.182.0 with `p/secrets` against `ci/legacy.gitlab-ci.yml`: **0 findings**, probably because they are AWS's well-known `…EXAMPLE` keys.
-   - Fixed the doc and recorded it as a gap: SAST is not secret scanning, so gitleaks and push protection would be a separate gate.
-2. **Invalid YAML in the Karpenter manifests.** The draft shared the `disruption:` block between the two NodePools with a YAML anchor (`&gpu-disruption` / `*gpu-disruption`).
-   - Anchors don't cross `---` document boundaries, so the file would not even parse.
-   - Caught on review, rewritten explicitly, then validated with `kubeconform -strict` against the Karpenter v1 CRD schemas.
-3. **Outdated versions from memory.** Left alone, the AI's defaults were roughly a year old (kubectl/k3s 1.31, Argo CD chart 7.x, Cloudflare provider v4 resource names).
-   - I made it look up current releases (k3s/kubectl 1.35.9, Argo CD chart 10.10.5 / v3.5.5, Cloudflare provider 5.28, Karpenter v1.14 docs) and pin them.
-   - GitHub Actions are pinned by commit SHA, not tag.
-4. **Wrong Docker-socket advice for Colima.** The README's troubleshooting table told Colima users to set `DOCKER_SOCK=$HOME/.colima/default/docker.sock`.
-   - That is backwards: a bind-mount source is resolved by the daemon inside the Colima VM, where the socket is `/var/run/docker.sock`.
-   - Caught when setting up Colima on my own Intel Mac (macOS 13, where Docker Desktop is no longer supported). `docker run -v /var/run/docker.sock:...` worked with the default, so I corrected the row.
-5. **The SAST gate failed on the first run** with `math/rand` in the app and the toolbox running as root.
-   - Rather than accept a blanket rule disable, each finding was triaged individually with an inline justification (see `MIGRATION-NOTES.md`).
+   - Running Semgrep 1.182.0 with `p/secrets` on the file gave **0 findings**, probably because they are AWS's well-known `…EXAMPLE` keys.
+   - Corrected, and recorded as a gap: SAST is not secret scanning, so gitleaks and push protection belong in a separate gate.
+2. **Invalid YAML.** The Karpenter draft shared a `disruption:` block between two NodePools via a YAML anchor. Anchors don't cross `---` document boundaries, so the file would not parse.
+   Rewritten explicitly and validated with `kubeconform -strict` against the Karpenter v1 schemas.
+3. **Wrong Docker-socket advice.** The README told Colima users to set `DOCKER_SOCK=$HOME/.colima/default/docker.sock`.
+   A bind-mount source is resolved by the daemon inside the VM, where the default `/var/run/docker.sock` is correct. Caught while setting up Colima on my Intel Mac (macOS 13, where Docker Desktop is no longer supported).
+4. **A troubleshooting write-up that guessed.** The first `TROUBLESHOOTING.md` was drafted from reading the manifests. Replaying the fixes one at a time on the cluster showed it was wrong twice:
+   - **Fault order:** the bad image tag only surfaces *after* the ConfigMap fix, because kubelet mounts volumes before pulling images.
+   - **Smoke-test error:** the Job failed with `curl: (7) Couldn't connect`, not the predicted DNS error.
 
-<!-- TODO (author): add what you hit yourself when running the stack end-to-end on a real Docker host,
-     e.g. anything the scaffold got wrong about k3d networking, Traefik HA, NetworkPolicy + kubelet probes, or GHCR visibility. -->
+   A long-lived probe pod then confirmed that DNS *is* blocked. The Job had slipped past DNS because kube-router isolates new pods a moment after start.
+   The document now contains only captured output.
+5. **A placement guarantee that wasn't one.** The README claimed the spread constraint keeps "at least one replica on on-demand".
+   - Draining the on-demand node and uncordoning it showed all 3 replicas **stayed on spot**: topology spread is only evaluated at scheduling time.
+   - Fixed by adding the descheduler (topology-spread plugin only), and the drill now proves the recovery (phase 2 of `25-reclaim-drill.sh`).
+6. **Unmeasured numbers and a missed requirement.**
+   - The README said the image was "~10 MB"; measured, it is 18.7 MB.
+   - A full re-read of the brief found that Part 5a's required paragraph on spot vs on-demand for AI inference existed only as YAML comments. It is now in `iac/README.md`.
+7. **Host env vars silently ignored.** `docker compose exec` does not forward the host environment, so `MAX_ERRORS=2 ./scripts/25-…` never took effect.
+   Found via prompt 3 above; fixed by forwarding an explicit allow-list with `exec -e`.
+8. **The SAST gate failed on its first local run**, on `math/rand` in the app and the toolbox running as root. This was expected, and good.
+   Each finding was triaged with an inline, justified `nosemgrep` instead of disabling rules repo-wide (see `MIGRATION-NOTES.md`).
+9. **This file itself.** An earlier AI draft of this disclosure listed a prompt I never sent, and credited me with instructions I never gave.
+   I caught it when I asked for every Markdown file to be checked against what actually happened, and rewrote the file from the real session.
+
+<!-- TODO (author): add anything you hit yourself, in your own words, before submitting. -->

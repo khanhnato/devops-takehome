@@ -47,7 +47,7 @@ I migrated the **intent** (test → build → deploy for quote-api), not the fil
   - `missing-user-entrypoint` in `toolbox/Dockerfile`: the toolbox must run as root to drive the host Docker socket, whose group id differs per host. It is a local dev tool, never deployed, so the risk is accepted with an inline `nosemgrep` and a comment.
 
   The app image itself runs as UID 65532 and is not exempted.
-- The provided inputs `troubleshoot/broken-app.yaml` and `ci/legacy.gitlab-ci.yml` are excluded in `.semgrepignore`. They are kept verbatim as assignment artifacts, not code we ship.
+- The provided inputs `troubleshoot/broken-app.yaml` and `ci/legacy.gitlab-ci.yml` are excluded in `.semgrepignore`. They are kept as assignment artifacts, not code we ship (verbatim, except the two redacted key values in the legacy file).
 - **Gap found while verifying:** before redaction, `p/secrets` did **not** flag the AWS keys in the legacy file, most likely because they are AWS's well-known `…EXAMPLE` values. So the SAST gate is not a secret-scanning gate.
   For real secret scanning I would add `gitleaks` (full history) as a separate blocking job, plus GitHub push protection.
 - To see the gate fail, add something like `exec.Command("sh", "-c", r.URL.Query().Get("cmd"))` to `app/main.go` in a PR.

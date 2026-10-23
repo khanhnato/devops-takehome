@@ -1,5 +1,6 @@
 # Part 3: fixed version of broken-app.yaml. Every change is tagged FIX #n,
-# matching the numbered issues in TROUBLESHOOTING.md.
+# matching the numbered issues in TROUBLESHOOTING.md (numbered in the order
+# they surfaced while debugging).
 ---
 apiVersion: v1
 kind: Namespace
@@ -100,27 +101,27 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: nginx:1.25.5               # FIX #1: 1.25.99 does not exist
+          image: nginx:1.25.5               # FIX #3: 1.25.99 does not exist
           ports:
             - name: http
               containerPort: 80
           resources:
             requests:
               cpu: 100m
-              memory: 32Mi                  # FIX #2: was 16Gi, unschedulable on any node
+              memory: 32Mi                  # FIX #1: was 16Gi, unschedulable on any node
             limits:
               cpu: 500m
               memory: 128Mi
           livenessProbe:
             httpGet:
               path: /
-              port: http                    # FIX #3: was 8080, nginx listens on 80
+              port: http                    # FIX #4: was 8080, nginx listens on 80
             initialDelaySeconds: 5
             periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /
-              port: http                    # FIX #3
+              port: http                    # FIX #4
             initialDelaySeconds: 3
             periodSeconds: 5
           volumeMounts:
@@ -129,7 +130,7 @@ spec:
       volumes:
         - name: html
           configMap:
-            name: web-config                # FIX #4: was web-conf (no such ConfigMap)
+            name: web-config                # FIX #2: was web-conf (no such ConfigMap)
 ---
 apiVersion: v1
 kind: Service

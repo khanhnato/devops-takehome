@@ -87,4 +87,5 @@ EOF
 log "Labeling/tainting nodepools with troubleshoot/prepare.sh"
 sh "$REPO_ROOT/troubleshoot/prepare.sh"
 
-ok "Cluster '$CLUSTER_NAME' is ready. Ingress: http://localhost:${HTTP_PORT}  Argo CD: http://localhost:${ARGOCD_PORT}"
+ok "Cluster '$CLUSTER_NAME' is ready (nodes labeled, ingress up). The app is NOT deployed yet."
+echo "    Next: ./scripts/run-all.sh   (then: curl http://localhost:${HTTP_PORT}/api/quote)"

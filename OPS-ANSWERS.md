@@ -31,7 +31,7 @@ The control plane moves **one minor at a time**, so this is two full cycles (→
   - SLO burn-rate (error rate, p99 latency).
   - Available replicas below desired for 10 minutes.
   - Pods `Pending` > 10m (replacement capacity never arrived: ICE, broken Karpenter).
-  - > 20% of nodes NotReady, or a spot node unreachable *without* an interruption notice: a real failure, page immediately.
+  - More than 20% of nodes NotReady, or a spot node unreachable *without* an interruption notice: a real failure, page immediately.
 - Add a Watchdog / dead-man's-switch alert so a silent alerting pipeline doesn't hide incidents.
 - High reclaim *rate* goes to a daily ticket ("diversify instance types"), not a page.
 

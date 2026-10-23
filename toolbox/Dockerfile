@@ -29,7 +29,8 @@ RUN git config --global --add safe.directory '*'
 COPY entrypoint.sh /entrypoint.sh
 ENV IN_TOOLBOX=1 KUBECONFIG=/root/.kube/config
 WORKDIR /workspace
-HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=200 \
+# Healthy once the cluster bootstrap succeeded; ~30 min budget for cold image pulls.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=360 \
   CMD [ "$(cat /tmp/bootstrap.status 2>/dev/null)" = "ok" ]
 # Root on purpose: the toolbox drives the host Docker socket (k3d) whose group id
 # differs per host. Local dev tool only, never deployed.
