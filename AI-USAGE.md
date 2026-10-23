@@ -55,4 +55,14 @@
 9. **This file itself.** An earlier AI draft of this disclosure listed a prompt I never sent, and credited me with instructions I never gave.
    I caught it when I asked for every Markdown file to be checked against what actually happened, and rewrote the file from the real session.
 
-<!-- TODO (author): add anything you hit yourself, in your own words, before submitting. -->
+## What I ran into myself
+
+- **My machine can't run Docker Desktop.** It is an Intel Mac on macOS 13, which current Docker Desktop no longer supports, and Homebrew has no prebuilt bottles for it either.
+  I installed Colima, Lima, the Docker CLI, compose, buildx and gh from their official release binaries, after checking each one's SHA-256.
+  Because I used Colima, I tested the repo on a Docker setup other than the "default" one, which is how the socket-path mistake (3 above) surfaced.
+- **Docker Hub timed out** (`TLS handshake timeout`) during my first `docker compose up -d`, so the k3d cluster creation failed and left a stray network behind.
+  A reviewer on a slow network would hit the same thing. The bootstrap now pre-pulls images with retries and cleans up leftovers, and teardown leaves the cluster network before deleting.
+- **I tested too early, then skipped a step.** After `docker compose up -d` said `Started`, I curled right away and got `Empty reply from server`. On the next fresh run I didn't run `run-all.sh` at all, and wondered why there was no `argocd` namespace.
+  Both were my mistakes, but a reviewer following the brief literally could make them too. That is why `up -d` now waits for a healthy cluster and says what to run next, and why `run-all.sh` starts with a preflight table.
+- **I treated "it ran once" as not enough.** Before committing, I wiped Docker completely (0 containers, images, volumes and networks) and re-ran exactly the reviewer's two commands from the local code.
+  After pushing, I ran them again from a fresh `git clone` of the public repo.
